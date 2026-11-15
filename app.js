@@ -49,9 +49,11 @@
   let sort = "featured";
   let lastKey = "";
   let forceScroll = false;
+  const scrollMemory = {};
   let trackStage = 0;
   let trackToken = 0;
   let timer = 0;
+  const memoryPackets = {};
 
   function load() {
     try {
@@ -67,11 +69,15 @@
   }
 
   function save() {
-    localStorage.setItem(KEY, JSON.stringify(state));
+    try {
+      localStorage.setItem(KEY, JSON.stringify(state));
+    } catch (err) {
+      // Private mode or a full disk. The plan still works until the tab closes.
+    }
   }
 
   function esc(value) {
-    return String(value).replace(/[&<>"']/g, (ch) => ({
+    return String(value == null ? "" : value).replace(/[&<>"']/g, (ch) => ({
       "&": "&amp;",
       "<": "&lt;",
       ">": "&gt;",
@@ -90,8 +96,8 @@
 
   function bandOf(months) {
     if (months <= 2) return "now";
-    if (months <= 10) return "six";
-    return "eighteen";
+    if (months <= 6) return "six";
+    return "later";
   }
 
   function whenLabel(months) {
@@ -104,24 +110,30 @@
     return n === 1 ? "1 hour" : `${n} hours`;
   }
 
+  function formatDate(ts, options) {
+    const date = new Date(ts);
+    if (Number.isNaN(date.getTime())) return "";
+    return new Intl.DateTimeFormat("en-GB", options).format(date);
+  }
+
   function shortDate(ts) {
-    return new Intl.DateTimeFormat("en-GB", {
-      day: "numeric",
-      month: "short",
-      year: "numeric"
-    }).format(new Date(ts));
+    return formatDate(ts, { day: "numeric", month: "short", year: "numeric" });
   }
 
   function longDate(ts) {
-    return new Intl.DateTimeFormat("en-GB", {
-      day: "numeric",
-      month: "long",
-      year: "numeric"
-    }).format(new Date(ts));
+    return formatDate(ts, { day: "numeric", month: "long", year: "numeric" });
   }
 
   function reducedMotion() {
     return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  }
+
+  function decodePart(value) {
+    try {
+      return decodeURIComponent(value);
+    } catch (err) {
+      return value;
+    }
   }
 
   function parse() {
@@ -129,7 +141,7 @@
     if (parts.length === 0) return { name: "board" };
     if (parts[0] === "plan") return { name: "plan" };
     if (["seat", "apply", "track", "letter", "saved"].includes(parts[0]) && parts[1]) {
-      return { name: parts[0], id: decodeURIComponent(parts[1]) };
+      return { name: parts[0], id: decodePart(parts[1]) };
     }
     return { name: "missing" };
   }
@@ -139,18 +151,33 @@
     else location.hash = hash;
   }
 
-  function readPacket() {
+  function readPackets() {
     try {
-      return JSON.parse(sessionStorage.getItem(PACKET) || "null");
+      const data = JSON.parse(sessionStorage.getItem(PACKET) || "null");
+      if (!data || typeof data !== "object") return {};
+      if (data.jobId && data.id) return { [data.jobId]: data };
+      return data;
     } catch (err) {
-      return null;
+      return {};
     }
   }
 
   function packetFor(jobId) {
-    const packet = readPacket();
+    if (memoryPackets[jobId]) return memoryPackets[jobId];
+    const packet = readPackets()[jobId];
     if (packet && packet.jobId === jobId) return packet;
     return null;
+  }
+
+  function remember(packet) {
+    memoryPackets[packet.jobId] = packet;
+    try {
+      const packets = readPackets();
+      packets[packet.jobId] = packet;
+      sessionStorage.setItem(PACKET, JSON.stringify(packets));
+    } catch (err) {
+      // The letter still quotes this packet until the tab closes.
+    }
   }
 
   function archive(packet) {
@@ -175,15 +202,26 @@
   }
 
   function countSteps() {
-    const tally = { now: 0, six: 0, eighteen: 0 };
+    const tally = { now: 0, six: 0, later: 0 };
     Object.entries(state.plans).forEach(([id, plan]) => {
       const job = jobById(id);
-      if (!job) return;
+      if (!job || !plan || typeof plan !== "object") return;
       job.path.forEach((step, index) => {
         if (!plan.checks || !plan.checks[String(index)]) tally[bandOf(step.months)] += 1;
       });
     });
     return tally;
+  }
+
+  function stepCopy(tally) {
+    const ahead = tally.now + tally.six + tally.later;
+    const finished = Object.keys(state.plans).some((id) => jobById(id)) && ahead === 0;
+    return {
+      note: finished
+        ? "Every step on this machine is checked. The seats are still not yours."
+        : "Steps still ahead. Now is the opening step. 6 months means it is due by then. Later is anything after six months.",
+      label: finished ? "Steps finished on paper" : "Steps still ahead"
+    };
   }
 
   function visibleJobs() {
@@ -208,7 +246,7 @@
   function paintNav(route) {
     const board = document.getElementById("board-link");
     const plan = document.getElementById("plan-link");
-    const count = Object.keys(state.plans).length;
+    const count = Object.keys(state.plans).filter((id) => jobById(id)).length;
     plan.textContent = count ? `Plan ${count}` : "Plan";
     if (route.name === "board") board.setAttribute("aria-current", "page");
     else board.removeAttribute("aria-current");
@@ -315,9 +353,10 @@
 
   function renderApply(job) {
     document.title = `Apply · ${job.title}`;
+    const packet = packetFor(job.id) || {};
     const choices = CHAPTERS.map((chapter) => `
       <label class="choice">
-        <input type="radio" name="chapter" value="${esc(chapter)}">
+        <input type="radio" name="chapter" value="${esc(chapter)}" ${chapter === packet.chapter ? "checked" : ""}>
         <span>${esc(chapter)}</span>
       </label>
     `).join("");
@@ -327,15 +366,15 @@
         <h1>Apply, on paper.</h1>
         <p class="lede">Chapter, one sentence, one line for the resume. Then a recruiter starts walking. No company receives this.</p>
         <form id="apply-form" data-id="${esc(job.id)}" novalidate autocomplete="off">
-          <ul class="errors" role="alert" hidden></ul>
+          <ul class="errors" role="alert" aria-live="assertive" hidden></ul>
           <fieldset>
             <legend>Which chapter are you in?</legend>
             ${choices}
           </fieldset>
           <label class="field" for="why">One sentence on why this seat</label>
-          <textarea id="why" name="why" maxlength="180" placeholder="${esc(job.whyHint)}"></textarea>
+          <textarea id="why" name="why" maxlength="180" placeholder="${esc(job.whyHint)}">${esc(packet.why || "")}</textarea>
           <label class="field" for="line">One line you would put on the resume</label>
-          <input id="line" name="line" type="text" maxlength="180" placeholder="${esc(job.lineHint)}" autocomplete="off">
+          <input id="line" name="line" type="text" maxlength="180" placeholder="${esc(job.lineHint)}" value="${esc(packet.line || "")}" autocomplete="off">
         </form>
       </section>
     `;
@@ -345,7 +384,8 @@
   function trackMarkup(job, index) {
     const stages = STAGES.map((stage, idx) => {
       const mode = idx < index ? "done" : idx === index ? "now" : "wait";
-      return `<li class="stage" data-stage data-state="${mode}"><span class="stage-num">${idx + 1}</span><span>${esc(stage.label)}</span></li>`;
+      const current = mode === "now" ? ' aria-current="step"' : "";
+      return `<li class="stage" data-stage data-state="${mode}"${current}><span class="stage-num">${idx + 1}</span><span>${esc(stage.label)}</span></li>`;
     }).join("");
     const width = ((index + 1) / STAGES.length) * 100;
     return `
@@ -375,7 +415,10 @@
     bar.querySelector("[data-bar]").style.width = `${((index + 1) / STAGES.length) * 100}%`;
     root.querySelector("[data-line]").textContent = stage.line(job);
     root.querySelectorAll("[data-stage]").forEach((item, idx) => {
-      item.dataset.state = idx < index ? "done" : idx === index ? "now" : "wait";
+      const mode = idx < index ? "done" : idx === index ? "now" : "wait";
+      item.dataset.state = mode;
+      if (mode === "now") item.setAttribute("aria-current", "step");
+      else item.removeAttribute("aria-current");
     });
     const next = dock.querySelector("[data-action='next-stage']");
     if (next) next.textContent = index >= STAGES.length - 1 ? "Open the letter" : "Next stage";
@@ -417,13 +460,14 @@
     const quote = packet ? `<blockquote>${esc(packet.why)}</blockquote>` : "";
     const chapter = packet ? `<p>You said: ${esc(packet.chapter)}</p>` : "";
     const line = packet ? `<p>The line under your name would have been: ${esc(packet.line)}</p>` : "";
+    const stamped = packet && packet.at ? packet.at : Date.now();
     main.innerHTML = `
       <article class="letter">
         <div class="letter-top">
           <p class="kicker">Offer letter</p>
           <p class="stamp">Not sent</p>
         </div>
-        <p class="letter-date">${esc(longDate(Date.now()))}</p>
+        <p class="letter-date">${esc(longDate(stamped))}</p>
         <h1>Dear you,</h1>
         <p>${esc(job.org)} would like you to join as ${esc(job.title)} in ${esc(job.city)}.</p>
         <p>The band is ${esc(job.comp)}. The Tuesday is the one you already read.</p>
@@ -496,8 +540,10 @@
         </div>
       `;
     const letters = state.letters
+      .filter((letter) => letter && letter.jobId)
       .map((letter) => ({ letter, job: jobById(letter.jobId) }))
       .filter((item) => item.job);
+    const copy = stepCopy(tally);
     const letterBlock = letters.length
       ? `
         <section class="block">
@@ -518,12 +564,12 @@
       <section class="pad plan">
         <h1>The plan</h1>
         <p class="lede">The part that stays on this machine. Checking a step does not make it done in the world.</p>
-        <div class="strip" aria-label="Steps still ahead">
+        <div class="strip" aria-label="${esc(copy.label)}">
           <div><b id="count-now">${tally.now}</b><span>Now</span></div>
           <div><b id="count-six">${tally.six}</b><span>6 months</span></div>
-          <div><b id="count-eighteen">${tally.eighteen}</b><span>18 months</span></div>
+          <div><b id="count-later">${tally.later}</b><span>Later</span></div>
         </div>
-        <p class="strip-note">Steps still ahead. Now is this month. 6 months is the middle. 18 months is the long end.</p>
+        <p class="strip-note">${esc(copy.note)}</p>
         ${body}
         ${letterBlock}
       </section>
@@ -546,6 +592,7 @@
     const route = parse();
     const key = `${route.name}:${route.id || ""}`;
     const changed = key !== lastKey;
+    if (lastKey && !forceScroll) scrollMemory[lastKey] = main.scrollTop;
     lastKey = key;
     paintNav(route);
     setDock("");
@@ -560,8 +607,10 @@
     else if (route.name === "saved") renderSaved(job);
     else if (route.name === "plan") renderPlan();
     else renderMissing();
-    if (changed || forceScroll) main.scrollTop = 0;
     if (changed) focusHeading();
+    if (forceScroll || scrollMemory[key] == null) main.scrollTop = 0;
+    else main.scrollTop = scrollMemory[key];
+    if (forceScroll) scrollMemory[key] = 0;
     forceScroll = false;
   }
 
@@ -594,7 +643,7 @@
       line,
       at: Date.now()
     };
-    sessionStorage.setItem(PACKET, JSON.stringify(packet));
+    remember(packet);
     go(`#/track/${form.dataset.id}`);
   }
 
@@ -610,19 +659,33 @@
     plan.checks[index] = input.checked;
     save();
     const tally = countSteps();
-    ["now", "six", "eighteen"].forEach((key) => {
+    const copy = stepCopy(tally);
+    ["now", "six", "later"].forEach((key) => {
       const el = document.getElementById(`count-${key}`);
       if (el) el.textContent = String(tally[key]);
     });
+    const note = document.querySelector(".strip-note");
+    if (note) note.textContent = copy.note;
+    const strip = document.querySelector(".strip");
+    if (strip) strip.setAttribute("aria-label", copy.label);
     const card = input.closest(".plan-card");
-    const note = card && card.querySelector(".path-done");
-    if (note) {
+    const doneNote = card && card.querySelector(".path-done");
+    if (doneNote) {
       const done = job.path.every((_, stepIndex) => plan.checks[String(stepIndex)]);
-      note.hidden = !done;
+      doneNote.hidden = !done;
     }
   }
 
   function onClick(event) {
+    const home = event.target.closest("a[href='#/']");
+    if (home && parse().name === "board" && (appetite !== "all" || sort !== "featured")) {
+      event.preventDefault();
+      appetite = "all";
+      sort = "featured";
+      forceScroll = true;
+      render();
+      return;
+    }
     const btn = event.target.closest("[data-action]");
     if (!btn) return;
     const action = btn.dataset.action;
@@ -631,7 +694,7 @@
       appetite = btn.dataset.appetite || "all";
       forceScroll = true;
       render();
-      const again = main.querySelector(`[data-appetite="${appetite}"]`);
+      const again = main.querySelector(`[data-appetite="${window.CSS && CSS.escape ? CSS.escape(appetite) : appetite}"]`);
       if (again) again.focus();
       return;
     }
@@ -674,10 +737,31 @@
     }
   }
 
+  function fitApp() {
+    const app = document.querySelector(".app");
+    const vv = window.visualViewport;
+    if (!app || !vv) return;
+    const height = `${Math.round(vv.height)}px`;
+    const offset = Math.max(0, Math.round(vv.offsetTop));
+    const transform = offset ? `translateY(${offset}px)` : "";
+    if (app.style.height !== height) app.style.height = height;
+    if (app.style.transform !== transform) app.style.transform = transform;
+  }
+
   document.querySelector(".app").addEventListener("click", onClick);
   document.querySelector(".app").addEventListener("submit", onSubmit);
   document.querySelector(".app").addEventListener("change", onChange);
+  document.querySelector(".app").addEventListener("focusin", (event) => {
+    if (!event.target.matches("textarea, input[type='text']")) return;
+    setTimeout(() => event.target.scrollIntoView({ block: "center" }), 50);
+  });
   window.addEventListener("hashchange", render);
+  if (window.visualViewport) {
+    visualViewport.addEventListener("resize", fitApp);
+    visualViewport.addEventListener("scroll", fitApp);
+    fitApp();
+  }
+  if ("scrollRestoration" in history) history.scrollRestoration = "manual";
   if (!location.hash || location.hash === "#") history.replaceState(null, "", "#/");
   render();
 })();
