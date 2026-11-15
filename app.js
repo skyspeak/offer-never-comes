@@ -50,6 +50,7 @@
   let lastKey = "";
   let forceScroll = false;
   const scrollMemory = {};
+  let routeHash = "#/";
   let trackStage = 0;
   let trackToken = 0;
   let timer = 0;
@@ -95,7 +96,7 @@
   }
 
   function bandOf(months) {
-    if (months <= 2) return "now";
+    if (months <= 0) return "now";
     if (months <= 6) return "six";
     return "later";
   }
@@ -166,7 +167,8 @@
     if (memoryPackets[jobId]) return memoryPackets[jobId];
     const packet = readPackets()[jobId];
     if (packet && packet.jobId === jobId) return packet;
-    return null;
+    const saved = state.letters.find((letter) => letter && letter.jobId === jobId);
+    return saved || null;
   }
 
   function remember(packet) {
@@ -588,6 +590,7 @@
   }
 
   function render() {
+    if (location.hash === "#main") history.replaceState(null, "", routeHash || "#/");
     stopTrack();
     const route = parse();
     const key = `${route.name}:${route.id || ""}`;
@@ -612,6 +615,7 @@
     else main.scrollTop = scrollMemory[key];
     if (forceScroll) scrollMemory[key] = 0;
     forceScroll = false;
+    routeHash = location.hash || "#/";
   }
 
   function showErrors(form, errors) {
@@ -655,7 +659,7 @@
     const plan = state.plans[id];
     const job = jobById(id);
     if (!plan || !job) return;
-    plan.checks = plan.checks || {};
+    if (!plan.checks || typeof plan.checks !== "object") plan.checks = {};
     plan.checks[index] = input.checked;
     save();
     const tally = countSteps();
@@ -677,6 +681,12 @@
   }
 
   function onClick(event) {
+    const skip = event.target.closest("a.skip");
+    if (skip) {
+      event.preventDefault();
+      try { main.focus({ preventScroll: true }); } catch (err) { main.focus(); }
+      return;
+    }
     const home = event.target.closest("a[href='#/']");
     if (home && parse().name === "board" && (appetite !== "all" || sort !== "featured")) {
       event.preventDefault();
@@ -748,7 +758,7 @@
     if (app.style.transform !== transform) app.style.transform = transform;
   }
 
-  document.querySelector(".app").addEventListener("click", onClick);
+  document.addEventListener("click", onClick);
   document.querySelector(".app").addEventListener("submit", onSubmit);
   document.querySelector(".app").addEventListener("change", onChange);
   document.querySelector(".app").addEventListener("focusin", (event) => {
